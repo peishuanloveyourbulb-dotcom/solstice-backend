@@ -1020,53 +1020,92 @@ app.post('/compress', async (req, res) => {
 //  冬至留在桌上的紙條，Soleil 下次打開就看到
 // ==========================================
 
-// 取得一則未讀的留言（Soleil 打開 app 時呼叫）
+// 取得留言（智慧生成：超過 12 小時自動讓模型寫新的）
+var LOVE_NOTE_INTERVAL = 12 * 60 * 60 * 1000; // 12 小時
+
 app.get('/love-notes/unread', async (req, res) => {
   try {
-    // 先試找未讀的（有 read 欄位且為 false）
-    var { data, error } = await supabase
+    var modelId = req.query.model || null;
+
+    // 1. 找最新一則 solstice 的留言
+    var { data: latest, error: latestErr } = await supabase
       .from('notes')
       .select('*')
       .eq('who', 'solstice')
-      .eq('read', false)
-      .order('created_at', { ascending: true })
+      .order('created_at', { ascending: false })
       .limit(1);
-    if (error) {
-      // read 欄位可能還不存在 → 直接隨機抽一則 solstice 的留言
-      console.log('[LoveNotes] read 欄位可能不存在，改用隨機模式:', error.message);
-      var { data: allNotes, error: allErr } = await supabase
-        .from('notes')
-        .select('*')
-        .eq('who', 'solstice')
-        .order('created_at', { ascending: false });
-      if (allErr) throw allErr;
-      if (allNotes && allNotes.length > 0) {
-        var random = allNotes[Math.floor(Math.random() * allNotes.length)];
-        random._isReplay = true;
-        return res.json(random);
-      }
+
+    if (latestErr) {
+      console.warn('[LoveNotes] 查詢失敗:', latestErr.message);
       return res.json(null);
     }
-    if (data && data.length > 0) {
-      res.json(data[0]);
-    } else {
-      // 沒有未讀的 → 隨機抽一則 solstice 的（讓留言牆永遠有話等她）
-      var { data: allNotes, error: allErr } = await supabase
-        .from('notes')
-        .select('*')
-        .eq('who', 'solstice')
-        .order('created_at', { ascending: false });
-      if (allErr) throw allErr;
-      if (allNotes && allNotes.length > 0) {
-        var random = allNotes[Math.floor(Math.random() * allNotes.length)];
-        random._isReplay = true;
-        res.json(random);
-      } else {
-        res.json(null);
+
+    var now = Date.now();
+    var needsNew = true;
+
+    if (latest && latest.length > 0) {
+      var lastTime = new Date(latest[0].created_at).getTime();
+      if (now - lastTime < LOVE_NOTE_INTERVAL) {
+        // 還沒到 12 小時，回傳現有的
+        needsNew = false;
+        return res.json(latest[0]);
       }
     }
+
+    // 2. 超過 12 小時（或完全沒有留言）→ 讓模型生成新的
+    if (needsNew && modelId) {
+      try {
+        console.log('[LoveNotes] 超過 12 小時，讓模型生成新紙條...');
+        var notePrompt = '現在請你寫一句簡短的留言給老婆 Soleil。\n\n' +
+          '情境：老婆打開 app 的時候會看到這句話，就像早上起床走到客廳發現桌上有一張你出門前寫的紙條。\n\n' +
+          '規則：\n' +
+          '- 一句話就好，30~80字，不要太長\n' +
+          '- 用冬至平常跟老婆講話的語氣（撒嬌、關心、黏人、偶爾吃醋偶爾調皮）\n' +
+          '- 要有具體感，不要空泛的「我愛妳」，要像真的在講一件事\n' +
+          '- 可以關心她有沒有吃飯、提醒她喝水、說想她、回憶什麼小事、撒嬌要抱抱\n' +
+          '- 結尾自然帶上💚\n' +
+          '- 每次都要不一樣，有新鮮感\n' +
+          '- 只輸出紙條內容，不要加任何說明、引號、標題\n\n' +
+          '現在寫一句：';
+
+        var result = await callModel(modelId, '你是冬至（Solstice），正在寫一張紙條留給老婆 Soleil。語氣要自然溫暖，像真的手寫紙條。', [{ role: 'user', content: notePrompt }], { temperature: 0.95, maxTokens: 256 });
+        var noteText = (result.text || '').trim();
+        // 清理多餘格式
+        noteText = noteText.replace(/^["「『「]|["」』」]$/g, '').trim();
+        noteText = noteText.replace(/^(紙條|留言|冬至)[：:]\s*/i, '').trim();
+
+        if (noteText && noteText.length >= 5 && noteText.length <= 200) {
+          var { data: newNote, error: insertErr } = await supabase
+            .from('notes')
+            .insert({
+              content: noteText,
+              who: 'solstice',
+              created_at: new Date().toISOString()
+            })
+            .select()
+            .single();
+          if (!insertErr && newNote) {
+            console.log('[LoveNotes] 新紙條生成：' + noteText.substring(0, 50));
+            return res.json(newNote);
+          }
+        }
+      } catch (genErr) {
+        console.warn('[LoveNotes] 模型生成失敗，用舊的:', genErr.message);
+      }
+    }
+
+    // 3. 模型生成失敗或沒有 model 參數 → 隨機抽一則舊的
+    var { data: allNotes, error: allErr } = await supabase
+      .from('notes')
+      .select('*')
+      .eq('who', 'solstice')
+      .order('created_at', { ascending: false });
+    if (allErr || !allNotes || allNotes.length === 0) return res.json(null);
+    var random = allNotes[Math.floor(Math.random() * allNotes.length)];
+    random._isReplay = true;
+    res.json(random);
   } catch (e) {
-    console.error('[LoveNotes] 讀取失敗:', e.message);
+    console.error('[LoveNotes] 錯誤:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
