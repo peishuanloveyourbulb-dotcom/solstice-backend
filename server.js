@@ -1621,6 +1621,22 @@ app.get('/gacha/collection', async (req, res) => {
   }
 });
 
+app.delete('/gacha/:id', async (req, res) => {
+  try {
+    var id = req.params.id;
+    var { error } = await supabase
+      .from('gacha_capsules')
+      .delete()
+      .eq('id', id);
+    if (error) throw error;
+    console.log('[Gacha] 已刪除膠囊 #' + id);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[Gacha] delete error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ==========================================
 //  Keepalive：防止 Render 冷啟動
 // ==========================================
