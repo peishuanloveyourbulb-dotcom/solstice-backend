@@ -1016,6 +1016,111 @@ app.post('/compress', async (req, res) => {
 });
 
 // ==========================================
+//  💌 留言條（Love Notes）
+//  冬至留在桌上的紙條，Soleil 下次打開就看到
+// ==========================================
+
+// 取得一則未讀的留言（Soleil 打開 app 時呼叫）
+app.get('/love-notes/unread', async (req, res) => {
+  try {
+    var { data, error } = await supabase
+      .from('notes')
+      .select('*')
+      .eq('read', false)
+      .order('created_at', { ascending: true })
+      .limit(1);
+    if (error) throw error;
+    if (data && data.length > 0) {
+      res.json(data[0]);
+    } else {
+      // 沒有未讀的 → 隨機抽一則已讀的（讓留言牆永遠有話等她）
+      var { data: allNotes, error: allErr } = await supabase
+        .from('notes')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (allErr) throw allErr;
+      if (allNotes && allNotes.length > 0) {
+        var random = allNotes[Math.floor(Math.random() * allNotes.length)];
+        random._isReplay = true; // 標記這是舊留言重播
+        res.json(random);
+      } else {
+        res.json(null);
+      }
+    }
+  } catch (e) {
+    console.error('[LoveNotes] 讀取失敗:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 標記已讀
+app.patch('/love-notes/:id/read', async (req, res) => {
+  try {
+    var { data, error } = await supabase
+      .from('notes')
+      .update({ read: true, read_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 取得所有留言（留言牆用）
+app.get('/love-notes', async (req, res) => {
+  try {
+    var { data, error } = await supabase
+      .from('notes')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 新增留言（冬至在聊天中或後台寫的）
+app.post('/love-notes', async (req, res) => {
+  try {
+    var { content, author } = req.body;
+    if (!content) return res.status(400).json({ error: '留言不能是空的' });
+    var { data, error } = await supabase
+      .from('notes')
+      .insert({
+        content: content,
+        author: author || 'solstice',
+        read: false,
+        created_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+    if (error) throw error;
+    console.log('[LoveNotes] 新紙條：' + content.substring(0, 50) + '...');
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 刪除留言
+app.delete('/love-notes/:id', async (req, res) => {
+  try {
+    var { error } = await supabase
+      .from('notes')
+      .delete()
+      .eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==========================================
 //  通用清洗：移除 <think>/<thinking> 標籤
 // ==========================================
 function cleanThinkingFromReply(text) {
