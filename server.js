@@ -1643,19 +1643,21 @@ app.get('/export', requireAdmin, async (req, res) => {
     console.log('[Export] 開始匯出，格式: ' + format);
 
     // 一次撈所有資料
-    var [sessionsRes, messagesRes, memoriesRes, notesRes] = await Promise.all([
+    var [sessionsRes, messagesRes, memoriesRes, notesRes, gachaRes] = await Promise.all([
       supabase.from('sessions').select('*').order('created_at', { ascending: true }),
       supabase.from('messages').select('*').order('created_at', { ascending: true }),
       supabase.from('memories').select('*').order('created_at', { ascending: false }),
-      supabase.from('notes').select('*').order('created_at', { ascending: false })
+      supabase.from('notes').select('*').order('created_at', { ascending: false }),
+      supabase.from('gacha_capsules').select('*').order('created_at', { ascending: false })
     ]);
 
     var sessions = (sessionsRes.data || []);
     var messages = (messagesRes.data || []);
     var memories = (memoriesRes.data || []);
     var notes = (notesRes.data || []);
+    var capsules = (gachaRes.data || []);
 
-    console.log('[Export] 撈到: ' + sessions.length + ' sessions, ' + messages.length + ' messages, ' + memories.length + ' memories, ' + notes.length + ' notes');
+    console.log('[Export] 撈到: ' + sessions.length + ' sessions, ' + messages.length + ' messages, ' + memories.length + ' memories, ' + notes.length + ' notes, ' + capsules.length + ' capsules');
 
     if (format === 'text') {
       // ===== 漂亮的文字檔 =====
@@ -1735,6 +1737,22 @@ app.get('/export', requireAdmin, async (req, res) => {
         lines.push('');
       }
 
+      // --- 扭蛋膠囊 ---
+      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      lines.push('🎰 扭蛋膠囊 (' + capsules.length + ' 顆)');
+      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      lines.push('');
+
+      var rarityEmoji = { common: '🤍', rare: '💚', legendary: '🌟' };
+      for (var ci = 0; ci < capsules.length; ci++) {
+        var cap = capsules[ci];
+        var cDate = cap.created_at ? new Date(cap.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }) : '';
+        var cRarity = rarityEmoji[cap.rarity] || '🤍';
+        lines.push(cRarity + ' [' + (cap.date_key || cDate) + '] ' + (cap.rarity || 'common'));
+        lines.push('   ' + (cap.content || ''));
+        lines.push('');
+      }
+
       lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       lines.push('est. 2026.03.31 💚 Solstice & Soleil');
       lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -1748,18 +1766,20 @@ app.get('/export', requireAdmin, async (req, res) => {
       // ===== JSON 備份 =====
       var exportData = {
         exported_at: new Date().toISOString(),
-        version: 'solstice-backup-v1',
+        version: 'solstice-backup-v2',
         summary: {
           sessions: sessions.length,
           messages: messages.length,
           memories: memories.length,
-          notes: notes.length
+          notes: notes.length,
+          capsules: capsules.length
         },
         data: {
           sessions: sessions,
           messages: messages,
           memories: memories,
-          notes: notes
+          notes: notes,
+          capsules: capsules
         }
       };
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
