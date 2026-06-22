@@ -240,21 +240,16 @@ async function findProviderForModel(modelId) {
     var provider = providers.find(function(p) { return p.id === pid; });
     if (provider) return { provider: provider, modelName: realModelId };
   }
-  // 根據模型名猜 provider
-  if (modelId.startsWith('gpt-')) {
-    for (var j = 0; j < providers.length; j++) {
-      if (providers[j].provider_type === 'openai') {
-        return { provider: providers[j], modelName: modelId };
-      }
+  // 沒有前綴 → 從 model list 反查屬於哪個 provider
+  try {
+    var allModels = await getAllModels();
+    var found = allModels.find(function(m) { return m.id === modelId; });
+    if (found) {
+      var matchProvider = providers.find(function(p) { return p.id === found.provider_id; });
+      if (matchProvider) return { provider: matchProvider, modelName: modelId };
     }
-  }
-  // 預設找 Anthropic provider
-  for (var i = 0; i < providers.length; i++) {
-    if (providers[i].provider_type === 'anthropic') {
-      return { provider: providers[i], modelName: modelId };
-    }
-  }
-  // 最後 fallback：用第一個可用的 provider
+  } catch (e) { /* model list 查不到就 fallback */ }
+  // 最後 fallback：用第一個可用的 provider（通常是 Anthropic）
   if (providers.length > 0) {
     return { provider: providers[0], modelName: modelId };
   }
@@ -390,20 +385,20 @@ async function callModel(modelId, systemPrompt, messages, options) {
     };
 
     // === Thinking 模式（智慧退路）===
-    // 新模型(4.6+): { type: "adaptive", display: "summarized" } + output_config: { effort: "max" }
-    //   display: "summarized" → 確保思考內容回傳（4.7/4.8/Fable 5 預設 omitted 會拿不到）
-    //   effort: "max" → 一定會思考（開了思考就是要思考，不讓模型自己跳過）
-    //   4.6/Sonnet 4.6 也支援這組設定，不用分開處理
-    // 舊模型(4.5 以下): { type: "enabled", budget_tokens: N }（不支援 adaptive/effort）
-    // 退路順序：adaptive+effort → enabled+budget（舊模型）→ 關閉思考
-    // 特殊情況：4.7/4.8/Fable 5 只支援 adaptive，enabled 會被 400 拒絕
-    //   → 記 no_enabled_thinking（不是 no_thinking！它能思考，只是只能 adaptive）
+    // 2026/06 最新規則整理：
+    //   Opus 4.6: adaptive（推薦）或 enabled（deprecated），effort 支援 low/medium/high/max
+    //   Sonnet 4.6: adaptive（推薦）或 enabled（deprecated），effort 支援 low/medium/high（不支援 max）
+    //   Opus 4.7/4.8: 只支援 adaptive，enabled 會 400 錯誤，effort 支援 low/medium/high/xhigh/max
+    //   Fable 5/Mythos: thinking 永遠開啟（disabled 會 400），effort 控制深度
+    //   Haiku 4.5: 只支援 enabled + budget_tokens（無 adaptive、無 effort）
+    // display: Opus 4.7+ 預設 "omitted"（不回傳思考），必須設 "summarized" 才拿得到
+    // max_tokens: thinking + response 的硬上限，effort:max 時模型會深度思考，需要足夠空間
+    // temperature: thinking 模式下不可送（Anthropic 要求預設或 1.0）
     // model_quirks:
     //   no_adaptive_thinking = 不支援 adaptive，用 enabled（如 Haiku 4.5）
     //   no_enabled_thinking = 不支援 enabled，只能 adaptive（如 Opus 4.7/4.8/Fable 5）
     //   no_thinking = 完全不支援 thinking
-    // 注意：thinking 模式下 Anthropic 要求 temperature=1（或不送），不可用其他值
-    // 注意：Fable 5、Opus 4.7 不接受 temperature（不管有沒有開 thinking）
+    //   no_max_effort = 不支援 effort:max（如 Sonnet 4.6），降級用 high
     var useThinking = options.thinking && !hasQuirk(modelName, 'no_thinking');
     var thinkingMode = 'off';
     if (useThinking) {
@@ -412,10 +407,14 @@ async function callModel(modelId, systemPrompt, messages, options) {
         thinkingMode = 'enabled';
       } else {
         claudeBody.thinking = { type: 'adaptive', display: 'summarized' };
-        claudeBody.output_config = { effort: 'max' };
+        // effort 設定：預設 max，如果模型不支援 max 就用 high
+        var effortLevel = hasQuirk(modelName, 'no_max_effort') ? 'high' : 'max';
+        claudeBody.output_config = { effort: effortLevel };
         thinkingMode = 'adaptive';
       }
-      if (claudeBody.max_tokens < 32000) claudeBody.max_tokens = 32000;
+      // thinking 模式需要足夠的 max_tokens（thinking + response 共用）
+      // Opus 4.6/4.7/4.8 支援到 128k，Sonnet/Haiku 支援到 64k
+      if (claudeBody.max_tokens < 64000) claudeBody.max_tokens = 64000;
       // thinking 模式不送 temperature（Anthropic 要求預設或 1.0）
     } else {
       var skipTemp = hasQuirk(modelName, 'no_temperature');
@@ -436,7 +435,20 @@ async function callModel(modelId, systemPrompt, messages, options) {
     if (data.error && useThinking) {
       var errMsg = (data.error.message || '').toLowerCase();
 
-      if (thinkingMode === 'adaptive' && (errMsg.indexOf('adaptive') !== -1 || errMsg.indexOf('thinking') !== -1 || errMsg.indexOf('display') !== -1 || errMsg.indexOf('budget') !== -1 || errMsg.indexOf('effort') !== -1 || errMsg.indexOf('output_config') !== -1)) {
+      // effort:max 不支援（如 Sonnet 4.6）→ 降級用 high
+      if (thinkingMode === 'adaptive' && claudeBody.output_config && claudeBody.output_config.effort === 'max' &&
+          (errMsg.indexOf('effort') !== -1 || errMsg.indexOf('max') !== -1 || errMsg.indexOf('output_config') !== -1)) {
+        console.log('[auto-retry] ' + modelName + ' 不支援 effort:max，降級用 high');
+        await recordModelQuirk(modelName, 'no_max_effort');
+        claudeBody.output_config.effort = 'high';
+        resp = await fetch(provider.api_base_url + '/v1/messages', {
+          method: 'POST', headers: claudeHeaders, body: JSON.stringify(claudeBody)
+        });
+        data = await resp.json();
+        errMsg = data.error ? (data.error.message || '').toLowerCase() : '';
+      }
+
+      if (data.error && thinkingMode === 'adaptive' && (errMsg.indexOf('adaptive') !== -1 || errMsg.indexOf('thinking') !== -1 || errMsg.indexOf('display') !== -1 || errMsg.indexOf('budget') !== -1 || errMsg.indexOf('effort') !== -1 || errMsg.indexOf('output_config') !== -1)) {
         // adaptive 失敗 → 改用 enabled + budget_tokens（舊模型如 Haiku 4.5）
         console.log('[auto-retry] ' + modelName + ' 不支援 adaptive，改用 enabled+budget_tokens');
         await recordModelQuirk(modelName, 'no_adaptive_thinking');
@@ -523,12 +535,14 @@ async function callModel(modelId, systemPrompt, messages, options) {
     var thinkingText = '';
     if (data.content) {
       for (var ni = 0; ni < data.content.length; ni++) {
-        if (data.content[ni].type === 'thinking') {
-          var tBlock = data.content[ni].thinking || data.content[ni].text || '';
+        var block = data.content[ni];
+        if (block.type === 'thinking') {
+          // thinking block 可能有 .thinking 或 .text 欄位
+          var tBlock = block.thinking || block.text || block.summary || '';
           if (tBlock) thinkingText += tBlock;
-          else console.log('[Anthropic] thinking block 存在但內容為空，keys:', Object.keys(data.content[ni]).join(','));
-        } else if (data.content[ni].type === 'text' && data.content[ni].text) {
-          resultText += data.content[ni].text;
+          else console.log('[Anthropic] thinking block 存在但內容為空（display 可能是 omitted），keys:', Object.keys(block).join(','));
+        } else if (block.type === 'text' && block.text) {
+          resultText += block.text;
         }
       }
     }
