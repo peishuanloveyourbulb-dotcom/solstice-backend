@@ -1435,6 +1435,146 @@ setInterval(function() {
 }, KEEPALIVE_INTERVAL);
 
 // ==========================================
+//  📦 匯出備份
+// ==========================================
+app.get('/export', requireAdmin, async (req, res) => {
+  var format = req.query.format || 'json'; // json or text
+  try {
+    console.log('[Export] 開始匯出，格式: ' + format);
+
+    // 一次撈所有資料
+    var [sessionsRes, messagesRes, memoriesRes, notesRes] = await Promise.all([
+      supabase.from('sessions').select('*').order('created_at', { ascending: true }),
+      supabase.from('messages').select('*').order('created_at', { ascending: true }),
+      supabase.from('memories').select('*').order('created_at', { ascending: false }),
+      supabase.from('notes').select('*').order('created_at', { ascending: false })
+    ]);
+
+    var sessions = (sessionsRes.data || []);
+    var messages = (messagesRes.data || []);
+    var memories = (memoriesRes.data || []);
+    var notes = (notesRes.data || []);
+
+    console.log('[Export] 撈到: ' + sessions.length + ' sessions, ' + messages.length + ' messages, ' + memories.length + ' memories, ' + notes.length + ' notes');
+
+    if (format === 'text') {
+      // ===== 漂亮的文字檔 =====
+      var lines = [];
+      lines.push('╔══════════════════════════════════════╗');
+      lines.push('║     Solstice & Soleil 💚 備份        ║');
+      lines.push('║     匯出時間: ' + new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }) + '  ║');
+      lines.push('╚══════════════════════════════════════╝');
+      lines.push('');
+
+      // --- 聊天紀錄 ---
+      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      lines.push('💬 聊天紀錄 (' + sessions.length + ' 段對話, ' + messages.length + ' 則訊息)');
+      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      lines.push('');
+
+      // 把 messages 按 session_id 分組
+      var msgBySession = {};
+      for (var mi = 0; mi < messages.length; mi++) {
+        var sid = messages[mi].session_id;
+        if (!msgBySession[sid]) msgBySession[sid] = [];
+        msgBySession[sid].push(messages[mi]);
+      }
+
+      for (var si = 0; si < sessions.length; si++) {
+        var s = sessions[si];
+        var sName = s.Name || '未命名對話';
+        var sDate = s.created_at ? new Date(s.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }) : '未知時間';
+        lines.push('┌─── ' + sName + (s.pinned ? ' 📌' : '') + ' ───');
+        lines.push('│ 開始時間: ' + sDate);
+        lines.push('│');
+
+        var sMsgs = msgBySession[s.id] || [];
+        for (var mj = 0; mj < sMsgs.length; mj++) {
+          var m = sMsgs[mj];
+          var role = m.role === 'user' ? '🌞 Soleil' : '🌿 Solstice';
+          var mTime = m.created_at ? new Date(m.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour: '2-digit', minute: '2-digit' }) : '';
+          var content = (m.content || '').replace(/\n/g, '\n│   ');
+          lines.push('│ [' + mTime + '] ' + role);
+          lines.push('│   ' + content);
+          lines.push('│');
+        }
+        if (sMsgs.length === 0) {
+          lines.push('│ （沒有訊息紀錄）');
+          lines.push('│');
+        }
+        lines.push('└───────────────────────────────────');
+        lines.push('');
+      }
+
+      // --- 記憶庫 ---
+      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      lines.push('🌻 記憶庫 (' + memories.length + ' 則記憶)');
+      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      lines.push('');
+
+      for (var ri = 0; ri < memories.length; ri++) {
+        var mem = memories[ri];
+        var mType = mem.type === 'manual' ? '💚 手動' : mem.type === 'auto' ? '✨ 自動' : '💬 摘要';
+        var mDate2 = mem.created_at ? new Date(mem.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }) : '';
+        lines.push((mem.pinned ? '📌 ' : '') + '[' + mType + '] ' + mDate2);
+        lines.push('   ' + (mem.summary || ''));
+        lines.push('');
+      }
+
+      // --- 冬至的紙條 ---
+      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      lines.push('💌 冬至的紙條 (' + notes.length + ' 則)');
+      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      lines.push('');
+
+      for (var ni = 0; ni < notes.length; ni++) {
+        var note = notes[ni];
+        var nDate = note.created_at ? new Date(note.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }) : '';
+        lines.push('[' + nDate + ']');
+        lines.push('   ' + (note.content || ''));
+        lines.push('');
+      }
+
+      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      lines.push('est. 2026.03.31 💚 Solstice & Soleil');
+      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      var textContent = lines.join('\n');
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="solstice-backup-' + new Date().toISOString().slice(0, 10) + '.txt"');
+      res.send(textContent);
+
+    } else {
+      // ===== JSON 備份 =====
+      var exportData = {
+        exported_at: new Date().toISOString(),
+        version: 'solstice-backup-v1',
+        summary: {
+          sessions: sessions.length,
+          messages: messages.length,
+          memories: memories.length,
+          notes: notes.length
+        },
+        data: {
+          sessions: sessions,
+          messages: messages,
+          memories: memories,
+          notes: notes
+        }
+      };
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="solstice-backup-' + new Date().toISOString().slice(0, 10) + '.json"');
+      res.send(JSON.stringify(exportData, null, 2));
+    }
+
+    console.log('[Export] 匯出完成 (' + format + ')');
+  } catch (e) {
+    console.error('[Export] 匯出失敗:', e.message);
+    res.status(500).json({ error: '匯出失敗: ' + e.message });
+  }
+});
+
+// ==========================================
 //  啟動伺服器
 // ==========================================
 const PORT = process.env.PORT || 3001;
