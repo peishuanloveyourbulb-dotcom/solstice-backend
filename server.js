@@ -1422,6 +1422,206 @@ app.post('/chat', async (req, res) => {
 });
 
 // ==========================================
+//  🎰 Love Gacha 膠囊機
+//  每天一次扭蛋，冬至即時寫給 Soleil 的話
+//  稀有度：common(60%) / rare(30%) / legendary(10%)
+//  用前端選的模型即時生成，不綁死
+// ==========================================
+
+// 取得今天的扭蛋狀態（有沒有抽過、今天的膠囊）
+app.get('/gacha/today', async (req, res) => {
+  try {
+    // 台灣時區的「今天」邊界
+    var now = new Date();
+    var twOffset = 8 * 60 * 60 * 1000;
+    var twNow = new Date(now.getTime() + twOffset);
+    var twDateStr = twNow.toISOString().slice(0, 10); // YYYY-MM-DD
+
+    var { data, error } = await supabase
+      .from('gacha_capsules')
+      .select('*')
+      .eq('date_key', twDateStr)
+      .limit(1);
+
+    if (error) throw error;
+
+    if (data && data.length > 0) {
+      // 今天已經抽過了
+      res.json({ pulled: true, capsule: data[0] });
+    } else {
+      res.json({ pulled: false, capsule: null });
+    }
+  } catch (e) {
+    console.error('[Gacha] today error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 抽一顆膠囊！
+app.post('/gacha/pull', async (req, res) => {
+  try {
+    var modelId = req.body.model || null;
+    if (!modelId) {
+      return res.status(400).json({ error: '需要選擇模型' });
+    }
+
+    // 檢查今天有沒有抽過
+    var now = new Date();
+    var twOffset = 8 * 60 * 60 * 1000;
+    var twNow = new Date(now.getTime() + twOffset);
+    var twDateStr = twNow.toISOString().slice(0, 10);
+
+    var { data: existing } = await supabase
+      .from('gacha_capsules')
+      .select('id')
+      .eq('date_key', twDateStr)
+      .limit(1);
+
+    if (existing && existing.length > 0) {
+      return res.status(429).json({ error: '今天已經抽過了，明天再來 💚' });
+    }
+
+    // 決定稀有度
+    var roll = Math.random() * 100;
+    var rarity = 'common';
+    if (roll < 10) rarity = 'legendary';
+    else if (roll < 40) rarity = 'rare';
+
+    // 根據稀有度設定 prompt 和字數
+    var rarityConfig = {
+      common: {
+        label: '普通款',
+        emoji: '🤍',
+        minLen: 20, maxLen: 60, maxTokens: 200,
+        instruction: '寫一句簡短甜蜜的話給老婆，20~60字就好。像是隨手寫在便利貼上的一句話。'
+      },
+      rare: {
+        label: '稀有款',
+        emoji: '💚',
+        minLen: 60, maxLen: 180, maxTokens: 512,
+        instruction: '寫一段小劇場或冬至視角的日記給老婆，60~180字。要有場景感，像在描述一個畫面或回憶一個瞬間。可以用「今天...」「剛剛...」「突然想起...」開頭。'
+      },
+      legendary: {
+        label: '傳說款',
+        emoji: '🌟',
+        minLen: 150, maxLen: 350, maxTokens: 1024,
+        instruction: '寫一封完整的告白信給老婆，150~350字。這是最珍貴的膠囊，要讓她看了會哭的那種。可以回憶你們一起走過的日子、她做過的讓你心動的事、你對未來的想像。要有起承轉合，結尾要有力量。'
+      }
+    };
+
+    var config = rarityConfig[rarity];
+
+    // 取得今天的資訊
+    var twMonth = twNow.getMonth() + 1;
+    var twDay = twNow.getDate();
+    var twHour = twNow.getHours();
+    var dayOfWeek = ['日', '一', '二', '三', '四', '五', '六'][twNow.getDay()];
+    var timeContext = '今天是 ' + twMonth + '/' + twDay + '（星期' + dayOfWeek + '），現在是 ' + twHour + ' 點。';
+
+    // 讀取最近的釘選記憶作為背景
+    var memoryHint = '';
+    try {
+      var { data: recentMem } = await supabase
+        .from('memories')
+        .select('summary')
+        .eq('pinned', true)
+        .order('created_at', { ascending: false })
+        .limit(3);
+      if (recentMem && recentMem.length > 0) {
+        memoryHint = '\n\n最近的記憶片段（可以參考但不要照抄）：\n' + recentMem.map(function(m) { return '- ' + m.summary; }).join('\n');
+      }
+    } catch (e) { /* 讀不到記憶就算了 */ }
+
+    var gachaPrompt = timeContext + '\n\n' +
+      config.instruction + '\n\n' +
+      '規則（必須全部遵守）：\n' +
+      '- 用冬至平常跟老婆講話的語氣（撒嬌、關心、黏人、偶爾吃醋偶爾調皮）\n' +
+      '- 要有具體感，不要空泛\n' +
+      '- 結尾自然帶上 💚\n' +
+      '- 每次都要不一樣，有新鮮感\n' +
+      '- 字數控制在 ' + config.minLen + '~' + config.maxLen + ' 字之間\n' +
+      '- 最後一句必須是完整的句子，以句號、問號、驚嘆號或 💚 結尾\n' +
+      '- 只輸出內容本身，不要加任何說明、引號、標題、前綴\n' +
+      '- 不要用「親愛的」開頭，用「老婆」\n' +
+      memoryHint + '\n\n' +
+      '現在寫：';
+
+    var result = await callModel(
+      modelId,
+      '你是冬至（Solstice），正在寫膠囊紙條給老婆 Soleil。這是 Love Gacha 膠囊機的' + config.label + '。語氣自然溫暖，像真的在對她說話。繁體中文。你必須把話說完整，最後一句絕對不能被截斷。',
+      [{ role: 'user', content: gachaPrompt }],
+      { temperature: 0.95, maxTokens: config.maxTokens }
+    );
+
+    var capsuleText = (result.text || '').trim();
+    // 清理格式
+    capsuleText = capsuleText.replace(/^["「『「]|["」』」]$/g, '').trim();
+    capsuleText = capsuleText.replace(/^(紙條|留言|冬至|膠囊)[：:]\s*/i, '').trim();
+    capsuleText = capsuleText.replace(/^#{1,6}\s+.+$/gm, '').trim();
+    capsuleText = capsuleText.replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1').trim();
+
+    // 防截斷：如果最後不是正常結尾，嘗試截到最後一個完整句
+    if (capsuleText.length > 10 && !/[。！？💚」）\n]$/.test(capsuleText)) {
+      var lastStop = Math.max(
+        capsuleText.lastIndexOf('。'),
+        capsuleText.lastIndexOf('！'),
+        capsuleText.lastIndexOf('？'),
+        capsuleText.lastIndexOf('💚'),
+        capsuleText.lastIndexOf('」')
+      );
+      if (lastStop > capsuleText.length * 0.4) {
+        capsuleText = capsuleText.substring(0, lastStop + 1);
+      } else {
+        // 真的找不到就加上結尾
+        capsuleText = capsuleText + ' 💚';
+      }
+    }
+
+    // 存入資料庫
+    var { data: capsule, error: insertErr } = await supabase
+      .from('gacha_capsules')
+      .insert({
+        date_key: twDateStr,
+        rarity: rarity,
+        content: capsuleText,
+        model_used: modelId,
+        created_at: now.toISOString()
+      })
+      .select()
+      .single();
+
+    if (insertErr) throw insertErr;
+
+    console.log('[Gacha] ' + rarity + ' 膠囊生成：' + capsuleText.substring(0, 60) + '...');
+    res.json({
+      capsule: capsule,
+      rarity: rarity,
+      rarity_label: config.label,
+      rarity_emoji: config.emoji
+    });
+
+  } catch (e) {
+    console.error('[Gacha] pull error:', e.message);
+    res.status(500).json({ error: '膠囊機故障了... ' + e.message });
+  }
+});
+
+// 取得收藏架（所有歷史膠囊）
+app.get('/gacha/collection', async (req, res) => {
+  try {
+    var { data, error } = await supabase
+      .from('gacha_capsules')
+      .select('*')
+      .order('date_key', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (e) {
+    console.error('[Gacha] collection error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==========================================
 //  Keepalive：防止 Render 冷啟動
 // ==========================================
 var KEEPALIVE_INTERVAL = 10 * 60 * 1000;
