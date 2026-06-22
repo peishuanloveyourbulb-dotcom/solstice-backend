@@ -1784,4 +1784,29 @@ app.listen(PORT, () => {
     console.log('[Boot] 已載入 ' + p.length + ' 個 API Provider');
   });
   loadAdminPassword();
+  // 自動建立 gacha_capsules 表（如果還不存在）
+  ensureGachaTable();
 });
+
+async function ensureGachaTable() {
+  try {
+    // 嘗試查詢，如果表不存在會報錯
+    var { error } = await supabase.from('gacha_capsules').select('id').limit(1);
+    if (error && error.code === '42P01') {
+      // 表不存在，用 rpc 建立（需要 Supabase 支援 raw SQL）
+      console.log('[Boot] gacha_capsules 表不存在，嘗試建立...');
+      var { error: createErr } = await supabase.rpc('exec_sql', {
+        query: "create table if not exists gacha_capsules (id bigint generated always as identity primary key, date_key text not null unique, rarity text not null default 'common', content text not null, model_used text, created_at timestamptz default now()); alter table gacha_capsules enable row level security; create policy \"Allow all for gacha_capsules\" on gacha_capsules for all using (true) with check (true);"
+      });
+      if (createErr) {
+        console.log('[Boot] 自動建表失敗（可能需要手動建立 gacha_capsules）:', createErr.message);
+      } else {
+        console.log('[Boot] ✅ gacha_capsules 表已自動建立');
+      }
+    } else if (!error) {
+      console.log('[Boot] ✅ gacha_capsules 表已存在');
+    }
+  } catch (e) {
+    console.log('[Boot] gacha_capsules 檢查跳過:', e.message);
+  }
+}
