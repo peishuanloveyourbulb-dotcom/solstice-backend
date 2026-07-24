@@ -49,7 +49,14 @@ const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   webpush.setVapidDetails('mailto:sol2@solstice.app', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
   console.log('[Push] VAPID keys loaded');
+} else {
+  console.log('[Push] VAPID keys MISSING — /push/vapid-public-key 會回 503');
 }
+
+// === 建置標記（部署驗證用）===
+// 老婆用瀏覽器打開 /health 就知道 Render 上跑的是不是最新版本
+const BUILD_TAG  = '2026-07-25-push';
+const STARTED_AT = new Date().toISOString();
 
 // 啟動時從 settings 表讀取密碼（如果有的話）
 async function loadAdminPassword() {
@@ -637,7 +644,13 @@ function requireAdmin(req, res, next) {
 //  路由：健康檢查
 // ==========================================
 app.get('/health', (req, res) => {
-  res.json({ status: 'Solstice is waiting 💚' });
+  res.json({
+    status: 'Solstice is waiting 💚',
+    build: BUILD_TAG,            // 這版是不是最新的
+    startedAt: STARTED_AT,       // Render 這個 instance 什麼時候起來的
+    pushReady: !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY),  // VAPID 環境變數有沒有設好
+    routes: { vapidKey: '/push/vapid-public-key' }
+  });
 });
 
 // ==========================================
