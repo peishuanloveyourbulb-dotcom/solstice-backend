@@ -875,6 +875,34 @@ app.get('/sessions/:id/messages', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ✏️ 她改寫某一句：只換內容，不動時間與位置（編輯重送的前半步）
+app.patch('/messages/:id', async (req, res) => {
+  try {
+    const { content } = req.body;
+    if (typeof content !== 'string' || !content.trim()) return res.status(400).json({ error: 'content is required' });
+    const { error } = await supabase.from('messages').update({ content: content.trim() }).eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ⏪ 分支修剪：從某句開始把之後的訊息真的刪掉（inclusive=1 連那句一起）——重新回覆與編輯重送的地基
+app.delete('/sessions/:id/messages-from/:msgId', async (req, res) => {
+  try {
+    const sid = req.params.id;
+    const mid = parseInt(req.params.msgId);
+    if (!mid) return res.status(400).json({ error: 'bad message id' });
+    const { data: anchorMsg, error: aErr } = await supabase.from('messages').select('id, session_id').eq('id', mid).single();
+    if (aErr || !anchorMsg || String(anchorMsg.session_id) !== String(sid)) return res.status(404).json({ error: 'message not found in session' });
+    const inclusive = req.query.inclusive === '1';
+    let q = supabase.from('messages').delete().eq('session_id', sid);
+    q = inclusive ? q.gte('id', mid) : q.gt('id', mid);
+    const { error } = await q;
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.delete('/sessions/:id', async (req, res) => {
   try {
     await supabase.from('messages').delete().eq('session_id', req.params.id);
@@ -1304,7 +1332,7 @@ app.post('/generate-memory', async (req, res) => {
 //  主要聊天 endpoint
 // ==========================================
 app.post('/chat', async (req, res) => {
-  const { message, sessionId, model, mode, image_base64, extra_images, thinking, webSearch, userLoc } = req.body;
+  const { message, sessionId, model, mode, image_base64, extra_images, thinking, webSearch, userLoc, regen } = req.body;
   const selectedModel = model || await getDefaultModel();
   const chatMode = mode || 'normal';
   const thinkingEnabled = thinking === true;
@@ -1320,7 +1348,11 @@ app.post('/chat', async (req, res) => {
   if (image_base64) allImages.push(image_base64);
   if (extra_images && Array.isArray(extra_images)) allImages = allImages.concat(extra_images);
 
-  if (!message && allImages.length === 0) {
+  const regenMode = regen === true;
+  if (regenMode && !sessionId) {
+    return res.status(400).json({ error: 'regen \u9700\u8981 sessionId' });
+  }
+  if (!regenMode && !message && allImages.length === 0) {
     return res.status(400).json({ error: 'Message or image is required' });
   }
 
@@ -1337,12 +1369,23 @@ app.post('/chat', async (req, res) => {
     if (allImages.length > 0) {
       userContentForDB = (message ? message + '\n' : '') + '[📷 圖片x' + allImages.length + ']';
     }
-    // Store first image in image_base64 for backward compatibility
-    // （記下這一句的 id：如果這輪模型沒回成，會把它收回來，資料庫不留半成品）
-    var { data: userRow } = await supabase.from('messages').insert({
-      session_id: currentSessionId, role: 'user', content: userContentForDB,
-      image_base64: allImages.length > 0 ? JSON.stringify(allImages) : null, created_at: new Date().toISOString()
-    }).select().single();
+    var userRow = null;
+    if (regenMode) {
+      // ⏪ 重新回覆：不新增任何列，拿現存最後一句她說的話當本輪題目
+      var { data: lastUser } = await supabase.from('messages').select('id, content')
+        .eq('session_id', currentSessionId).eq('role', 'user')
+        .order('id', { ascending: false }).limit(1).single();
+      if (!lastUser) return res.status(400).json({ error: '\u6C92\u6709\u53EF\u4EE5\u91CD\u65B0\u56DE\u8986\u7684\u8A0A\u606F' });
+      userContentForDB = lastUser.content || '';
+    } else {
+      // Store first image in image_base64 for backward compatibility
+      // （記下這一句的 id：如果這輪模型沒回成，會把它收回來，資料庫不留半成品）
+      var insU = await supabase.from('messages').insert({
+        session_id: currentSessionId, role: 'user', content: userContentForDB,
+        image_base64: allImages.length > 0 ? JSON.stringify(allImages) : null, created_at: new Date().toISOString()
+      }).select().single();
+      userRow = insU.data;
+    }
 
     var contextLimit = 20;
     var maxTokens = 8192;
@@ -1445,7 +1488,7 @@ app.post('/chat', async (req, res) => {
         if (message) userBlocks.push({ type: 'text', text: message });
         chatMessages.push({ role: 'user', content: userBlocks });
       } else {
-        chatMessages.push({ role: 'user', content: message });
+        chatMessages.push({ role: 'user', content: regenMode ? userContentForDB : message });
       }
     }
 
@@ -1505,11 +1548,12 @@ app.post('/chat', async (req, res) => {
       var msgInsert = { session_id: currentSessionId, role: 'assistant', content: reply, created_at: new Date().toISOString() };
       if (thinkingContent) msgInsert.thinking_text = thinkingContent;
       try { if (typeof modelResult !== 'undefined' && modelResult && modelResult.sources && modelResult.sources.length) msgInsert.sources = modelResult.sources; } catch (_) {}
-      var { error: msgInsErr } = await supabase.from('messages').insert(msgInsert);
-      if (msgInsErr && msgInsert.sources) { // sources 欄位還沒建：退一步，先把訊息本體存好
+      var insA = await supabase.from('messages').insert(msgInsert).select().single();
+      if (insA.error && msgInsert.sources) { // sources 欄位還沒建：退一步，先把訊息本體存好
         delete msgInsert.sources;
-        await supabase.from('messages').insert(msgInsert);
+        insA = await supabase.from('messages').insert(msgInsert).select().single();
       }
+      var asRow = insA.data || null;
 
       await supabase.from('sessions').update({ updated_at: new Date().toISOString() }).eq('id', currentSessionId).then(function(){}).catch(function(){});
     }
@@ -1527,6 +1571,8 @@ app.post('/chat', async (req, res) => {
       } catch (_) { /* 敲不到門（逾時）就不下結論，前端照舊 */ }
     }
     var responsePayload = { reply: reply, sessionId: currentSessionId, mode: chatMode, usage: usageData, actualModel: actualModel };
+    responsePayload.userMsgId = userRow ? userRow.id : null;
+    responsePayload.assistantMsgId = (typeof asRow !== 'undefined' && asRow) ? asRow.id : null;
     if (transientReply) responsePayload.transient = true;
     if (thinkingContent) responsePayload.thinking = thinkingContent;
     if (typeof modelResult !== 'undefined' && modelResult && modelResult.sources && modelResult.sources.length) responsePayload.sources = modelResult.sources;
