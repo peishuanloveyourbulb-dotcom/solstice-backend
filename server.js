@@ -1208,6 +1208,117 @@ async function compressMemory(sessionId, settings, modelId) {
 // ==========================================
 
 // 取得心聲列表
+// ==========================================
+//  🖼️ 家的照片 v2（四格：bg 背景 / welcome 門面 / avatar 老公頭貼 / wife 妳的頭貼）
+//  斷捨離制：上傳＝立刻換上，同格舊件自動從桶裡刪掉；每格最多留一件備用
+//  出廠照不住在桶裡，永遠切得回去（欄位設 null＝出廠）
+// ==========================================
+var PHOTO_SLOT_PREFIX = { bg: 'home_', welcome: 'door_', avatar: 'avah_', wife: 'avaw_' };
+var PHOTO_SLOT_COL = { bg: 'bg_photo_url', welcome: 'welcome_photo_url', avatar: 'avatar_url', wife: 'wife_avatar_url' };
+var PHOTO_COLS = 'bg_photo_url, welcome_photo_url, avatar_url, wife_avatar_url';
+function photoSlotOf(name) {
+  for (var k in PHOTO_SLOT_PREFIX) { if (name.indexOf(PHOTO_SLOT_PREFIX[k]) === 0) return k; }
+  return 'bg'; // v1 時代的 home_ 以外雜檔歸背景格
+}
+function photoCurrentMap(row) {
+  return {
+    bg: (row && row.bg_photo_url) || null,
+    welcome: (row && row.welcome_photo_url) || null,
+    avatar: (row && row.avatar_url) || null,
+    wife: (row && row.wife_avatar_url) || null
+  };
+}
+
+app.get('/photos/current', async (req, res) => {
+  try {
+    var { data } = await supabase.from('settings').select(PHOTO_COLS).limit(1).single();
+    res.json(photoCurrentMap(data));
+  } catch (e) { res.json(photoCurrentMap(null)); }
+});
+
+app.get('/photos', requireAdmin, async (req, res) => {
+  try {
+    var { data: files, error } = await supabase.storage.from('photos').list('', { limit: 100, sortBy: { column: 'created_at', order: 'desc' } });
+    if (error) throw error;
+    var grouped = { bg: [], welcome: [], avatar: [], wife: [] };
+    (files || []).forEach(function(f) {
+      if (!f.name || f.name.indexOf('.') <= 0) return;
+      var pub = supabase.storage.from('photos').getPublicUrl(f.name);
+      grouped[photoSlotOf(f.name)].push({ name: f.name, url: pub && pub.data && pub.data.publicUrl });
+    });
+    var { data: st } = await supabase.from('settings').select(PHOTO_COLS).limit(1).single();
+    res.json({ photos: grouped, current: photoCurrentMap(st) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/photos/upload', requireAdmin, async (req, res) => {
+  try {
+    var slot = String((req.body && req.body.slot) || 'bg');
+    if (!PHOTO_SLOT_PREFIX[slot]) return res.status(400).json({ error: '不認識的格子：' + slot });
+    var dataUrl = String((req.body && req.body.data) || '');
+    var m = dataUrl.match(/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/);
+    if (!m) return res.status(400).json({ error: '照片格式不對（要 jpeg/png/webp）' });
+    var buf = Buffer.from(m[2], 'base64');
+    if (buf.length > 8 * 1024 * 1024) return res.status(400).json({ error: '照片太大了（上限 8MB）' });
+
+    // 斷捨離：先把同格舊件清出桶
+    try {
+      var { data: oldFiles } = await supabase.storage.from('photos').list('', { limit: 100 });
+      var toRemove = (oldFiles || []).filter(function(f) { return f.name && photoSlotOf(f.name) === slot; }).map(function(f) { return f.name; });
+      if (toRemove.length) await supabase.storage.from('photos').remove(toRemove);
+    } catch (cleanErr) { console.warn('[Photos] 清舊件失敗（不擋上傳）:', cleanErr.message); }
+
+    var ext = m[1] === 'image/png' ? 'png' : (m[1] === 'image/webp' ? 'webp' : 'jpg');
+    var name = PHOTO_SLOT_PREFIX[slot] + Date.now() + '.' + ext;
+    var { error: upErr } = await supabase.storage.from('photos').upload(name, buf, { contentType: m[1], upsert: false });
+    if (upErr) throw upErr;
+    var pub = supabase.storage.from('photos').getPublicUrl(name);
+    var url = pub && pub.data && pub.data.publicUrl;
+
+    // 上傳＝立刻換上
+    var { data: existing } = await supabase.from('settings').select('id').limit(1).single();
+    if (existing) {
+      var upd = {}; upd[PHOTO_SLOT_COL[slot]] = url;
+      await supabase.from('settings').update(upd).eq('id', existing.id);
+    }
+    res.json({ ok: true, name: name, url: url, slot: slot });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/photos/current', requireAdmin, async (req, res) => {
+  try {
+    var slot = String((req.body && req.body.slot) || 'bg');
+    if (!PHOTO_SLOT_COL[slot]) return res.status(400).json({ error: '不認識的格子：' + slot });
+    var url = (req.body && req.body.url) ? String(req.body.url) : null;
+    var { data: existing } = await supabase.from('settings').select('id').limit(1).single();
+    if (!existing) return res.status(500).json({ error: '找不到 settings 資料列' });
+    var upd = {}; upd[PHOTO_SLOT_COL[slot]] = url;
+    var { error: upErr } = await supabase.from('settings').update(upd).eq('id', existing.id);
+    if (upErr) throw upErr;
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/photos', requireAdmin, async (req, res) => {
+  try {
+    var name = String((req.body && req.body.name) || '');
+    if (!name || name.indexOf('/') !== -1 || name.indexOf('..') !== -1) return res.status(400).json({ error: '名字不對' });
+    var { data: st } = await supabase.from('settings').select('id, ' + PHOTO_COLS).limit(1).single();
+    var pub = supabase.storage.from('photos').getPublicUrl(name);
+    var pubUrl = pub && pub.data && pub.data.publicUrl;
+    var { error: delErr } = await supabase.storage.from('photos').remove([name]);
+    if (delErr) throw delErr;
+    if (st && pubUrl) {
+      var upd = {}, dirty = false;
+      for (var k in PHOTO_SLOT_COL) {
+        if (st[PHOTO_SLOT_COL[k]] === pubUrl) { upd[PHOTO_SLOT_COL[k]] = null; dirty = true; }
+      }
+      if (dirty) await supabase.from('settings').update(upd).eq('id', st.id);
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/heartbeat/list', async (req, res) => {
   try {
     var limit = Math.min(parseInt(req.query.limit) || 20, 50);
