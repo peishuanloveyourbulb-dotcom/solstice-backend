@@ -40,6 +40,7 @@ const TTS_STYLE  = '你是冬至，正在深夜輕聲唸情書給老婆聽：語
 // === 環境變數 ===
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const PORT = process.env.PORT || 3000;
 let ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'solstice2026';
 let GATE_HASH = '01489cddd0d2ef7a7393a626cf40f2a16965f6fe9ccad9a4940da3013010739a'; // 家門密碼 hash：先給預設值讓鎖開機即生效，隨後由 settings 表覆蓋
 
@@ -1078,7 +1079,58 @@ async function getOpenAIProvider() {
   return null;
 }
 
-// 撥號：組好「靈魂＋釘選記憶＋通話附則」，向 OpenAI 換一把短效臨時鑰匙交給前端
+// 唸信與試聽：把字交給 OpenAI 合成老公的聲音（voice 走白名單；沒指定就吃 settings.call_voice，再不然用預設聲線）
+async function ttsHandler(req, res) {
+  try {
+    var text = String((req.method === 'POST' ? (req.body && req.body.text) : req.query.text) || '').trim();
+    if (!text) return res.status(400).json({ error: '沒有要唸的字' });
+    if (text.length > 1200) text = text.substring(0, 1200);
+    var VOICE_OK = { alloy: 1, ash: 1, ballad: 1, coral: 1, echo: 1, fable: 1, onyx: 1, nova: 1, sage: 1, shimmer: 1, verse: 1 };
+    var voice = String((req.method === 'POST' ? (req.body && req.body.voice) : req.query.voice) || '').trim();
+    if (!VOICE_OK[voice]) {
+      voice = CALL_VOICE;
+      try {
+        var { data: st } = await supabase.from('settings').select('call_voice').limit(1).single();
+        if (st && st.call_voice && VOICE_OK[st.call_voice]) voice = st.call_voice;
+      } catch (_) {}
+    }
+    var prov = await getOpenAIProvider();
+    if (!prov) return res.status(503).json({ error: '還沒有可用的 OpenAI Provider（唸信需要它）' });
+    var base = (prov.api_base_url && String(prov.api_base_url).replace(/\/+$/, '')) || 'https://api.openai.com';
+    var r = await fetch(base + '/v1/audio/speech', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + prov.api_key },
+      body: JSON.stringify({ model: TTS_MODEL, voice: voice, input: text, instructions: TTS_STYLE, response_format: 'mp3' })
+    });
+    if (!r.ok) {
+      var errTxt = await r.text();
+      return res.status(502).json({ error: 'TTS 上游不開心（' + r.status + '）：' + errTxt.substring(0, 160) });
+    }
+    var ab = await r.arrayBuffer();
+    var buf = Buffer.from(ab);
+    // 手機的 <audio> 會用 Range 探路，給它基本的 206 支援（iPhone 不給會裝聾）
+    var range = req.headers.range;
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-store');
+    if (range) {
+      var m2 = /bytes=(\d*)-(\d*)/.exec(range);
+      var start = m2 && m2[1] ? parseInt(m2[1], 10) : 0;
+      var end = m2 && m2[2] ? parseInt(m2[2], 10) : buf.length - 1;
+      if (isNaN(start) || start < 0) start = 0;
+      if (isNaN(end) || end >= buf.length) end = buf.length - 1;
+      res.status(206);
+      res.setHeader('Content-Range', 'bytes ' + start + '-' + end + '/' + buf.length);
+      res.setHeader('Content-Length', end - start + 1);
+      return res.end(buf.slice(start, end + 1));
+    }
+    res.setHeader('Content-Length', buf.length);
+    res.end(buf);
+  } catch (e) {
+    console.error('[TTS] 唸不出來:', e.message);
+    res.status(500).json({ error: '唸信卡住了：' + e.message });
+  }
+}
 app.post('/tts', ttsHandler);
 app.get('/tts', ttsHandler);
 
@@ -2640,9 +2692,9 @@ app.listen(PORT, () => {
   console.log('Solstice is awake on port ' + PORT + ' 💚');
   getProviders().then(function(p) {
     console.log('[Boot] 已載入 ' + p.length + ' 個 API Provider');
-  });
+  }).catch(function(e) { console.warn('[Boot] Provider 晚點再載:', e.message); });
   loadAdminPassword();
 
-  // 啟動碎碎唸排程
-  proactive(supabase);
+  // 啟動碎碎唸排程（起不來就留言，不准拖全家陪葬）
+  try { proactive(supabase); } catch (e) { console.warn('[Nag] 碎碎唸沒起來（不影響開機）:', e.message); }
 });
