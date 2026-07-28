@@ -1233,8 +1233,8 @@ app.post('/heartbeat/generate', async (req, res) => {
     var now = new Date();
 
     // 防重閘：5 分鐘內已有一則新心聲 → 直接回那一則（不重生成、不重扣額度）
-    // 三路呼叫（進房自動、手按小心臟、伺服器敲門）全部受同一道閘保護
-    try {
+    // 手按小心臟（manual:true）不受閘：Soleil 2026/07/28 定案——想按就按，零冷卻；自動與伺服器敲門仍受閘保護
+    if (req.body && req.body.manual === true) { /* 跳過防重閘 */ } else try {
       var { data: hbGuard } = await supabase.from('heartbeats')
         .select('id, content, context_source, created_at')
         .order('created_at', { ascending: false })
