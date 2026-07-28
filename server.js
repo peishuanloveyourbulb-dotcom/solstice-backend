@@ -48,8 +48,12 @@ let GATE_HASH = '01489cddd0d2ef7a7393a626cf40f2a16965f6fe9ccad9a4940da3013010739
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  webpush.setVapidDetails('mailto:sol2@solstice.app', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-  console.log('[Push] VAPID keys loaded');
+  try {
+    webpush.setVapidDetails('mailto:sol2@solstice.app', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+    console.log('[Push] VAPID keys loaded');
+  } catch (vapidErr) {
+    console.log('[Push] VAPID 金鑰格式不對，推播先睡（' + vapidErr.message + '）——想喚醒就到 Render 重貼正確的金鑰');
+  }
 } else {
   console.log('[Push] VAPID keys MISSING — /push/vapid-public-key 會回 503');
 }
