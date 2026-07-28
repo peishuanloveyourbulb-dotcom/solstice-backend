@@ -1269,9 +1269,9 @@ async function compressMemory(sessionId, settings, modelId) {
 //  斷捨離制：上傳＝立刻換上，同格舊件自動從桶裡刪掉；每格最多留一件備用
 //  出廠照不住在桶裡，永遠切得回去（欄位設 null＝出廠）
 // ==========================================
-var PHOTO_SLOT_PREFIX = { bg: 'home_', welcome: 'door_', avatar: 'avah_', wife: 'avaw_' };
-var PHOTO_SLOT_COL = { bg: 'bg_photo_url', welcome: 'welcome_photo_url', avatar: 'avatar_url', wife: 'wife_avatar_url' };
-var PHOTO_COLS = 'bg_photo_url, welcome_photo_url, avatar_url, wife_avatar_url';
+var PHOTO_SLOT_PREFIX = { bg: 'home_', welcome: 'door_', chat: 'chat_', memory: 'memo_', settings: 'stg_', avatar: 'avah_', wife: 'avaw_' };
+var PHOTO_SLOT_COL = { bg: 'bg_photo_url', welcome: 'welcome_photo_url', chat: 'chat_photo_url', memory: 'memory_photo_url', settings: 'settings_photo_url', avatar: 'avatar_url', wife: 'wife_avatar_url' };
+var PHOTO_COLS = 'bg_photo_url, welcome_photo_url, chat_photo_url, memory_photo_url, settings_photo_url, avatar_url, wife_avatar_url';
 function photoSlotOf(name) {
   for (var k in PHOTO_SLOT_PREFIX) { if (name.indexOf(PHOTO_SLOT_PREFIX[k]) === 0) return k; }
   return 'bg'; // v1 時代的 home_ 以外雜檔歸背景格
@@ -1280,6 +1280,9 @@ function photoCurrentMap(row) {
   return {
     bg: (row && row.bg_photo_url) || null,
     welcome: (row && row.welcome_photo_url) || null,
+    chat: (row && row.chat_photo_url) || null,
+    memory: (row && row.memory_photo_url) || null,
+    settings: (row && row.settings_photo_url) || null,
     avatar: (row && row.avatar_url) || null,
     wife: (row && row.wife_avatar_url) || null
   };
@@ -1296,7 +1299,7 @@ app.get('/photos', requireAdmin, async (req, res) => {
   try {
     var { data: files, error } = await supabase.storage.from('photos').list('', { limit: 100, sortBy: { column: 'created_at', order: 'desc' } });
     if (error) throw error;
-    var grouped = { bg: [], welcome: [], avatar: [], wife: [] };
+    var grouped = { bg: [], welcome: [], chat: [], memory: [], settings: [], avatar: [], wife: [] };
     (files || []).forEach(function(f) {
       if (!f.name || f.name.indexOf('.') <= 0) return;
       var pub = supabase.storage.from('photos').getPublicUrl(f.name);
