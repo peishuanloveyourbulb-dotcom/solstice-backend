@@ -14,7 +14,7 @@ app.use(express.json({ limit: '30mb' }));
 //  前端解鎖家門後把 hash 存起來、由 fetch 包裝自動戴上（x-gate-hash）；
 //  管理員密碼（x-admin-password）同樣放行，作為備援鑰匙。
 // ==========================================
-var GATE_OPEN_PATHS = { '/health': 1, '/auth/verify-gate': 1, '/setup': 1 };
+var GATE_OPEN_PATHS = { '/health': 1, '/auth/verify-gate': 1, '/setup': 1, '/photos/current': 1 }; // 照片指標是公開桶網址，開機先拿得到才不會閃舊圖
 function requireGate(req, res, next) {
   var h = req.headers['x-gate-hash'];
   if (h && GATE_HASH && h === GATE_HASH) return next();
